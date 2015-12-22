@@ -22,13 +22,9 @@ import (
 	"log"
 	"net"
 	"os"
-	"os/signal"
 	"regexp"
-	"runtime/debug"
 	"strings"
 	"sync"
-	"syscall"
-	"time"
 
 	"github.com/wheelcomplex/dns"
 	"github.com/wheelcomplex/preinit/getopt"
@@ -107,20 +103,10 @@ func main() {
 		}
 	}
 
-	// install signal USR1 for debug
-	sigCh := make(chan os.Signal, 128)
-	signal.Notify(sigCh, syscall.SIGUSR1)
+	if debuglevel >= 8 {
+		misc.StackPrintUSR1()
+	}
 
-	go func() {
-		sig := <-sigCh
-		if sig == syscall.SIGUSR1 {
-			if debuglevel >= 8 {
-				fmt.Printf("\n------ runtime stack start %v ------\n", time.Now())
-				debug.PrintStack()
-				fmt.Printf("\n------ runtime stack end ------\n")
-			}
-		}
-	}()
 	if debuglevel >= 1 {
 		fmt.Printf("[%d]dns proxy listen(TCP+UDP) %s, upstreams %s ...\n", os.Getpid(), srvListenAddr, misc.ArgsToList(upstreamServers))
 		if noraceproxy {
@@ -237,10 +223,10 @@ func mproxy(addrs []string, w dns.ResponseWriter, req *dns.Msg) {
 		}
 		return
 	}
-	if debuglevel >= 2 {
-		fmt.Printf("race proxying request from %s, upstream %s, transport %s: %s\n", w.RemoteAddr().String(), misc.ArgsToList(addrs), transport, req.Question[0].String())
-	} else if debuglevel >= 3 {
+	if debuglevel >= 3 {
 		fmt.Printf("race proxying request from %s, upstream %s, transport %s: \n%s\n", w.RemoteAddr().String(), misc.ArgsToList(addrs), transport, req.String())
+	} else if debuglevel >= 2 {
+		fmt.Printf("race proxying request from %s, upstream %s, transport %s: %s\n", w.RemoteAddr().String(), misc.ArgsToList(addrs), transport, req.BriefString())
 	}
 	if isTransfer(req) && len(addrs) > 0 {
 		addr := addrs[0]
@@ -323,10 +309,10 @@ func mproxy(addrs []string, w dns.ResponseWriter, req *dns.Msg) {
 			continue
 		}
 		w.WriteMsg(raceresp.resp)
-		if debuglevel >= 2 {
-			fmt.Printf("return response to %s, upstream %s finally: %s\n", w.RemoteAddr().String(), raceresp.addr, raceresp.resp.Answer[0].String())
-		} else if debuglevel >= 3 {
+		if debuglevel >= 3 {
 			fmt.Printf("return response to %s, upstream %s finally: \n%s\n", w.RemoteAddr().String(), raceresp.addr, raceresp.resp.String())
+		} else if debuglevel >= 2 {
+			fmt.Printf("return response to %s, upstream %s finally: %s\n", w.RemoteAddr().String(), raceresp.addr, raceresp.resp.BriefString())
 		}
 		return
 	}
