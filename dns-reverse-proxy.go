@@ -41,8 +41,6 @@ var (
 	upstreamServers = opt.OnceStringList("--upstreams", "8.8.8.8:53,8.8.4.4:53,119.29.29.29:53",
 		"Upstream DNS server where to send queries if no route matched (IP:port)")
 
-	defaultServer string = ""
-
 	// note: Bool option always default to false
 	noraceproxy = opt.OnceBool("--norace", "disable race mode, send queries to first upstream only, by default, proxy send queries to all upstreams and use the first response")
 
@@ -52,7 +50,7 @@ var (
 
 	routeList = opt.OnceString("--routes", "*.google.com=8.8.8.8:53,*.facebook.com=8.8.8.8:53",
 		"List of routes where to send queries (subdomain=IP:port)")
-	routes map[string]string
+	routingTable map[string]string
 
 	allowTransfer = opt.OnceString("allow-transfer", "127.0.0.1",
 		"List of IPs allowed to transfer (AXFR/IXFR)")
@@ -76,9 +74,10 @@ func main() {
 
 	//
 	if len(upstreamServers) > 0 {
-		defaultServer = upstreamServers[0]
-	}
-	if defaultServer == "" {
+		if noraceproxy {
+			upstreamServers = upstreamServers[:1]
+		}
+	} else {
 		log.Fatal("--upstreams is required")
 		opt.Usage()
 		os.Exit(1)
@@ -89,17 +88,23 @@ func main() {
 		os.Exit(1)
 	}
 	transferIPs = strings.Split(allowTransfer, ",")
-	routes = make(map[string]string)
+	routingTable = make(map[string]string)
 	if routeList != "" {
 		for _, s := range strings.Split(routeList, ",") {
 			s := strings.SplitN(s, "=", 2)
 			if len(s) != 2 {
-				log.Fatal("invalid -routes format")
+				log.Fatal("invalid -routes format(split failed)")
+			}
+			if len(s[0]) < 2 {
+				log.Fatal("invalid -routes format, " + s[0] + " too short")
 			}
 			if !strings.HasSuffix(s[0], ".") {
 				s[0] += "."
 			}
-			routes[s[0]] = s[1]
+			if !strings.Contains(s[1], ":") {
+				s[1] += ":53"
+			}
+			routingTable[s[0]] = s[1]
 		}
 	}
 
@@ -109,12 +114,17 @@ func main() {
 
 	if debuglevel >= 1 {
 		fmt.Printf("[%d]dns proxy listen(TCP+UDP) %s, upstreams %s ...\n", os.Getpid(), srvListenAddr, misc.ArgsToList(upstreamServers))
+		fmt.Printf("debug level: %d\n", debuglevel)
 		if noraceproxy {
 			fmt.Printf("race mode disabled.\n")
 		} else {
 			fmt.Printf("race mode enabled.\n")
 		}
-		fmt.Printf("debug level: %d\n", debuglevel)
+		fmt.Printf("upstream routings:\n")
+		for idx, val := range routingTable {
+			fmt.Printf("\t%s => %s\n", idx, val)
+		}
+		fmt.Printf("\t------\n")
 	}
 	udpServer := &dns.Server{Addr: srvListenAddr, Net: "udp"}
 	tcpServer := &dns.Server{Addr: srvListenAddr, Net: "tcp"}
@@ -133,17 +143,26 @@ func route(w dns.ResponseWriter, req *dns.Msg) {
 		dns.HandleFailed(w, req)
 		return
 	}
-	for name, addr := range routes {
+	for name, addr := range routingTable {
 		if strings.HasSuffix(req.Question[0].Name, name) {
-			proxy(addr, w, req)
+			if debuglevel >= 2 {
+				fmt.Printf("static routing %s to %s, %s\n", req.Question[0].Name, name, addr)
+			}
+			mproxy([]string{addr}, w, req)
+			return
+		}
+		if len(name) >= 3 && name[:2] == "*." &&
+			(strings.HasSuffix(req.Question[0].Name, name[1:]) ||
+				req.Question[0].Name == name[2:]) {
+			if debuglevel >= 2 {
+				fmt.Printf("wildcard routing %s to %s, %s\n", req.Question[0].Name, name, addr)
+			}
+			mproxy([]string{addr}, w, req)
 			return
 		}
 	}
-	if noraceproxy {
-		proxy(defaultServer, w, req)
-	} else {
-		mproxy(upstreamServers, w, req)
-	}
+	mproxy(upstreamServers, w, req)
+	return
 }
 
 func isTransfer(req *dns.Msg) bool {
@@ -178,37 +197,6 @@ func allowed(w dns.ResponseWriter, req *dns.Msg) bool {
 		}
 	}
 	return false
-}
-
-func proxy(addr string, w dns.ResponseWriter, req *dns.Msg) {
-	transport := "udp"
-	if _, ok := w.RemoteAddr().(*net.TCPAddr); ok {
-		transport = "tcp"
-	}
-	if isTransfer(req) {
-		if transport != "tcp" {
-			dns.HandleFailed(w, req)
-			return
-		}
-		t := new(dns.Transfer)
-		c, err := t.In(req, addr)
-		if err != nil {
-			dns.HandleFailed(w, req)
-			return
-		}
-		if err = t.Out(w, req, c); err != nil {
-			dns.HandleFailed(w, req)
-			return
-		}
-		return
-	}
-	c := &dns.Client{Net: transport}
-	resp, _, err := c.Exchange(req, addr)
-	if err != nil {
-		dns.HandleFailed(w, req)
-		return
-	}
-	w.WriteMsg(resp)
 }
 
 // send request to multi-dns-server and use the first response
